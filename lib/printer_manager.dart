@@ -250,14 +250,28 @@ class PrinterManager {
       try {
         final services = await printer.discoverServices();
 
+        // Prefer a characteristic that supports write-without-response: bulk ESC/POS
+        // payloads don't need a per-chunk GATT acknowledgment, and waiting for one is
+        // the dominant cost of BLE printing on some platforms (iOS in particular, where
+        // acknowledged writes are serialized and noticeably slower than on Android).
+        // Fall back to a with-response-only characteristic if that's all the printer offers.
         BleCharacteristic? writeCharacteristic;
+        var supportsWriteWithoutResponse = false;
+        outer:
         for (final service in services) {
           for (final characteristic in service.characteristics) {
             if (characteristic.properties.contains(
-              CharacteristicProperty.write,
+              CharacteristicProperty.writeWithoutResponse,
             )) {
               writeCharacteristic = characteristic;
-              break;
+              supportsWriteWithoutResponse = true;
+              break outer;
+            }
+            if (writeCharacteristic == null &&
+                characteristic.properties.contains(
+                  CharacteristicProperty.write,
+                )) {
+              writeCharacteristic = characteristic;
             }
           }
         }
@@ -266,6 +280,9 @@ class PrinterManager {
           log('No write characteristic found');
           return;
         }
+        // requestMtu's iOS/macOS implementation ignores expectedMtu and reports the actual
+        // negotiated write-without-response length, so this stays correctly sized as long as
+        // we actually write without response below when the characteristic supports it.
         final mtu = chunkSize ??
             (Platform.isWindows
                 ? 50
@@ -280,17 +297,13 @@ class PrinterManager {
 
           await writeCharacteristic.write(
             Uint8List.fromList(chunk),
+            withResponse: !supportsWriteWithoutResponse,
           );
 
           // Small delay between chunks to avoid overwhelming the device
           if (longData) {
             await Future.delayed(const Duration(milliseconds: 10));
           }
-
-          ///
-          /// [refreshDuration] The duration between each scan refresh.
-          /// [connectionTypes] List of connection types to scan for (BLE, USB).
-          /// [androidUsesFineLocation] Whether to use fine location on Android for BLE scanning.
         }
         return;
       } catch (e) {
